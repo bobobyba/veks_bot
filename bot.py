@@ -13,27 +13,55 @@ from telegram.ext import (
 )
 
 # ==================== НАСТРОЙКА ЛОГГИРОВАНИЯ ====================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('bot.log'),
-        logging.StreamHandler()
-    ]
-)
+# Отключаем шумные логи от зависимостей
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+# Настраиваем наше логирование
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+# Логи в файл
+file_handler = logging.FileHandler('bot.log')
+file_handler.setFormatter(formatter)
+
+# Логи в консоль
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(formatter)
+
+logger.addHandler(file_handler)
+logger.addHandler(stream_handler)
 
 # ==================== ЗАЩИТА ОТ ДУБЛИРОВАНИЯ ====================
-if platform.system() != "Windows":
-    try:
-        lock_socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        lock_socket.bind('\0' + 'VeKs_bot_lock')
-        logger.info("🔒 Бот запущен в единственном экземпляре")
-    except socket.error:
-        logger.error("⚠️ Ошибка: уже запущена другая копия бота!")
-        exit(1)
-else:
-    logger.warning("⚠️ Защита через сокеты отключена для Windows")
+def prevent_multiple_instances():
+    """Блокировка множественных экземпляров бота"""
+    if platform.system() == "Windows":
+        # Для Windows используем файловую блокировку
+        lock_file = "VeKs_bot.lock"
+        try:
+            if os.path.exists(lock_file):
+                os.remove(lock_file)
+            fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+            logger.info("🔒 Файловая блокировка установлена (Windows)")
+            return fd
+        except OSError:
+            logger.error("⚠️ Бот уже запущен! Завершаем процесс.")
+            exit(1)
+    else:
+        # Для Linux/Mac используем socket-блокировку
+        try:
+            lock_socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            lock_socket.bind('\0' + 'VeKs_bot_lock')
+            logger.info("🔒 Сокет-блокировка установлена (UNIX)")
+            return lock_socket
+        except socket.error:
+            logger.error("⚠️ Бот уже запущен! Завершаем процесс.")
+            exit(1)
+
+# Инициализируем блокировку
+prevent_multiple_instances()
 
 # ==================== КОНСТАНТЫ И НАСТРОЙКИ ====================
 TOKEN = os.getenv('TELEGRAM_TOKEN')
