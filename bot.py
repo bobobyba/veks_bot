@@ -1,7 +1,7 @@
-import platform
-import socket
 import logging
 import os
+import asyncio
+import telegram
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -11,6 +11,21 @@ from telegram.ext import (
     CallbackContext,
     filters
 )
+
+# Глобальная блокировка для предотвращения дублирования
+import fcntl
+lock_file = None
+
+def acquire_lock():
+    global lock_file
+    lock_file = open('bot.lock', 'w')
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        logger.info("🔒 Файловая блокировка установлена")
+        return True
+    except (IOError, BlockingIOError):
+        logger.warning("⚠️ Бот уже запущен! Завершаем процесс.")
+        return False
 
 # ==================== НАСТРОЙКА ЛОГГИРОВАНИЯ ====================
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -31,26 +46,8 @@ logger.addHandler(stream_handler)
 
 # ==================== ЗАЩИТА ОТ ДУБЛИРОВАНИЯ ====================
 def prevent_multiple_instances():
-    if platform.system() == "Windows":
-        lock_file = "VeKs_bot.lock"
-        try:
-            if os.path.exists(lock_file):
-                os.remove(lock_file)
-            fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_RDWR)
-            logger.info("🔒 Файловая блокировка установлена (Windows)")
-            return fd
-        except OSError:
-            logger.error("⚠️ Бот уже запущен! Завершаем процесс.")
-            exit(1)
-    else:
-        try:
-            lock_socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-            lock_socket.bind('\0' + 'VeKs_bot_lock')
-            logger.info("🔒 Сокет-блокировка установлена (UNIX)")
-            return lock_socket
-        except socket.error:
-            logger.error("⚠️ Бот уже запущен! Завершаем процесс.")
-            exit(1)
+    if not acquire_lock():
+        exit(1)
 
 prevent_multiple_instances()
 
@@ -90,22 +87,6 @@ STEP_COMPLETED = 6
 user_data = {}
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================== 
-def calculate_cost(material: str, material_type: str, height: float, width: float, quantity: int) -> str:
-    """Рассчитывает стоимость заказа с компактным выводом"""
-    if material not in MATERIALS or material_type not in MATERIALS[material]:
-        return "❌ Ошибка: неверно указан материал"
-    
-    price_per_sqm = MATERIALS[material][material_type]
-    area = height * width
-    total_cost = area * price_per_sqm * quantity
-    
-    return (
-        f"📊 <b>Итоговый расчет</b>\n\n"
-        f"🖨️ Материал: {material} ({material_type})\n"
-        f"📏 Размер: {width}м × {height}м | "
-        f"🔢 Количество: {quantity} шт.\n\n"
-        f"💵 <b>Стоимость: {format_price(total_cost)} руб.</b>"
-    )
 
 def parse_number(text: str) -> float:
     """Преобразует строку в число, заменяя запятые на точки"""
@@ -267,17 +248,16 @@ async def restart(update: Update, context: CallbackContext) -> None:
     await start(update, context)
 
 # ==================== ЗАПУСК БОТА ====================
-def main() -> None:
-    """Запуск приложения"""
+async def main():
+    """Основная асинхронная функция запуска"""
     try:
         application = Application.builder().token(TOKEN).build()
+        
+        # Асинхронный сброс вебхука
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("✅ Вебхук сброшен, соединения очищены")
 
-        # Принудительный сброс предыдущих соединений
-        from telegram import Bot
-        Bot(TOKEN).delete_webhook(drop_pending_updates=True)
-        logger.info("Сброшены предыдущие соединения с Telegram API")
-
-        # Регистрация обработчиков
+        # Регистрация обработчиков (ваш существующий код)
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CallbackQueryHandler(material_selection, pattern="^(банер|пленка|холст)$"))
         application.add_handler(CallbackQueryHandler(material_type_selection, pattern="^type_"))
@@ -285,11 +265,18 @@ def main() -> None:
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
         logger.info("🤖 Бот запускается...")
-        application.run_polling()
+        await application.run_polling()
 
+    except telegram.error.Conflict as e:
+        logger.error(f"🚨 Конфликт: {e}. Убедитесь, что бот не запущен в другом месте.")
     except Exception as e:
-        logger.error(f"🚨 Ошибка при запуске бота: {str(e)}")
-        exit(1)
+        logger.error(f"🚨 Критическая ошибка: {str(e)}")
+    except KeyboardInterrupt:
+        logger.info("🛑 Бот остановлен пользователем")
+    finally:
+        if lock_file:
+            lock_file.close()
 
 if __name__ == '__main__':
-    main()
+    prevent_multiple_instances()  # Проверка перед запуском
+    asyncio.run(main())
