@@ -13,21 +13,16 @@ from telegram.ext import (
 )
 
 # ==================== НАСТРОЙКА ЛОГГИРОВАНИЯ ====================
-# Отключаем шумные логи от зависимостей
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-# Настраиваем наше логирование
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# Логи в файл
 file_handler = logging.FileHandler('bot.log')
 file_handler.setFormatter(formatter)
-
-# Логи в консоль
 stream_handler = logging.StreamHandler()
 stream_handler.setFormatter(formatter)
 
@@ -36,9 +31,7 @@ logger.addHandler(stream_handler)
 
 # ==================== ЗАЩИТА ОТ ДУБЛИРОВАНИЯ ====================
 def prevent_multiple_instances():
-    """Блокировка множественных экземпляров бота"""
     if platform.system() == "Windows":
-        # Для Windows используем файловую блокировку
         lock_file = "VeKs_bot.lock"
         try:
             if os.path.exists(lock_file):
@@ -50,7 +43,6 @@ def prevent_multiple_instances():
             logger.error("⚠️ Бот уже запущен! Завершаем процесс.")
             exit(1)
     else:
-        # Для Linux/Mac используем socket-блокировку
         try:
             lock_socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
             lock_socket.bind('\0' + 'VeKs_bot_lock')
@@ -60,19 +52,26 @@ def prevent_multiple_instances():
             logger.error("⚠️ Бот уже запущен! Завершаем процесс.")
             exit(1)
 
-# Инициализируем блокировку
 prevent_multiple_instances()
 
 # ==================== КОНСТАНТЫ И НАСТРОЙКИ ====================
 TOKEN = os.getenv('TELEGRAM_TOKEN')
-if not TOKEN:
-    logger.error("❌ Токен бота не найден! Убедитесь, что переменная TELEGRAM_TOKEN установлена")
-    exit(1)
 
-materials = {
-    'банер': 300,
-    'пленка': 500,
-    'холст': 700
+# Структура материалов с ценами
+MATERIALS = {
+    'банер': {
+        'Ламинированный': 350,
+        'Литой': 400, 
+        'Двухсторонний': 450
+    },
+    'пленка': {
+        'С ламинацией': 550,
+        'Без ламинации': 500
+    },
+    'холст': {
+        'Натуральный': 800,
+        'Синтетический': 700
+    }
 }
 
 MIN_SIZE = 0.1
@@ -80,33 +79,30 @@ MAX_SIZE = 50.0
 MIN_QUANTITY = 1
 MAX_QUANTITY = 1000
 
+# Шаги диалога
 STEP_MATERIAL = 1
-STEP_WIDTH = 2
-STEP_HEIGHT = 3
-STEP_QUANTITY = 4
-STEP_COMPLETED = 5
+STEP_MATERIAL_TYPE = 2
+STEP_WIDTH = 3
+STEP_HEIGHT = 4
+STEP_QUANTITY = 5
+STEP_COMPLETED = 6
 
 user_data = {}
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
-def format_price(price: float) -> str:
-    """Форматирует цену с пробелами между тысячами"""
-    return "{:,.2f}".format(price).replace(",", " ").replace(".", ",")
-
-def calculate_cost(material: str, height: float, width: float, quantity: int) -> str:
-    """Рассчитывает стоимость заказа"""
-    if material not in materials:
-        return "❌ Ошибка: материал не найден"
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================== 
+def calculate_cost(material: str, material_type: str, height: float, width: float, quantity: int) -> str:
+    """Рассчитывает стоимость заказа с компактным выводом"""
+    if material not in MATERIALS or material_type not in MATERIALS[material]:
+        return "❌ Ошибка: неверно указан материал"
     
-    material_cost = materials[material]
+    price_per_sqm = MATERIALS[material][material_type]
     area = height * width
-    cost_per_item = area * material_cost
-    total_cost = cost_per_item * quantity
+    total_cost = area * price_per_sqm * quantity
     
     return (
         f"📊 <b>Итоговый расчет</b>\n\n"
-        f"🖨️ Материал: {material}\n"
-        f"📐 Размер: {width}м × {height}м\n"
+        f"🖨️ Материал: {material} ({material_type})\n"
+        f"📏 Размер: {width}м × {height}м | "
         f"🔢 Количество: {quantity} шт.\n\n"
         f"💵 <b>Стоимость: {format_price(total_cost)} руб.</b>"
     )
@@ -143,15 +139,63 @@ async def start(update: Update, context: CallbackContext) -> None:
         await update.callback_query.edit_message_text(welcome_message, reply_markup=reply_markup, parse_mode='HTML')
 
 async def material_selection(update: Update, context: CallbackContext) -> None:
-    """Обработчик выбора материала"""
+    """Обработчик выбора основного материала"""
     query = update.callback_query
     await query.answer()
     
     material = query.data
-    user_data[query.from_user.id] = {'material': material, 'step': STEP_WIDTH}
+    user_data[query.from_user.id] = {
+        'material': material,
+        'step': STEP_MATERIAL_TYPE
+    }
+    
+    # Создаем кнопки для подтипов материала
+    buttons = []
+    for material_type in MATERIALS[material]:
+        buttons.append([InlineKeyboardButton(material_type, callback_data=f"type_{material_type}")])
+    
+    reply_markup = InlineKeyboardMarkup(buttons)
+    await query.edit_message_text(
+        text=f"🖌️ <b>Выбран материал:</b> {material}\n\nВыберите тип:",
+        reply_markup=reply_markup,
+        parse_mode='HTML'
+    )
+
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================== 
+def format_price(price: float) -> str:
+    """Форматирует цену с пробелами между тысячами"""
+    return "{:,.2f}".format(price).replace(",", " ").replace(".", ",")
+
+def calculate_cost(material: str, material_type: str, height: float, width: float, quantity: int) -> str:
+    """Рассчитывает стоимость заказа с компактным выводом"""
+    if material not in MATERIALS or material_type not in MATERIALS[material]:
+        return "❌ Ошибка: неверно указан материал"
+    
+    price_per_sqm = MATERIALS[material][material_type]
+    area = height * width
+    total_cost = area * price_per_sqm * quantity
+    
+    return (
+        f"📊 <b>Итоговый расчет</b>\n\n"
+        f"🖨️ Материал: {material} ({material_type})\n"
+        f"📏 Размер: {width}м × {height}м | "
+        f"🔢 Количество: {quantity} шт.\n\n"
+        f"💵 <b>Стоимость: {format_price(total_cost)} руб.</b>"
+    )
+
+async def material_type_selection(update: Update, context: CallbackContext) -> None:
+    """Обработчик выбора типа материала"""
+    query = update.callback_query
+    await query.answer()
+    
+    material_type = query.data.replace('type_', '')
+    user_id = query.from_user.id
+    user_data[user_id]['material_type'] = material_type
+    user_data[user_id]['step'] = STEP_WIDTH
     
     await query.edit_message_text(
-        text=f"🖌️ <b>Выбран материал:</b> {material}\n\nВведите ширину в метрах:",
+        text=f"🖨️ <b>Материал:</b> {user_data[user_id]['material']} ({material_type})\n\n"
+             f"Введите ширину в метрах:",
         parse_mode='HTML'
     )
 
@@ -200,10 +244,11 @@ async def handle_message(update: Update, context: CallbackContext) -> None:
                 raise ValueError(f"Количество должно быть от {MIN_QUANTITY} до {MAX_QUANTITY} шт.")
             
             material = user_data[user_id]['material']
+            material_type = user_data[user_id]['material_type']
             width = user_data[user_id]['width']
             height = user_data[user_id]['height']
             
-            result = calculate_cost(material, height, width, quantity)
+            result = calculate_cost(material, material_type, height, width, quantity)
             user_data[user_id]['step'] = STEP_COMPLETED
             
             keyboard = [[InlineKeyboardButton("🔄 Новый расчет", callback_data="restart")]]
@@ -227,8 +272,15 @@ def main() -> None:
     try:
         application = Application.builder().token(TOKEN).build()
 
+        # Принудительный сброс предыдущих соединений
+        from telegram import Bot
+        Bot(TOKEN).delete_webhook(drop_pending_updates=True)
+        logger.info("Сброшены предыдущие соединения с Telegram API")
+
+        # Регистрация обработчиков
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CallbackQueryHandler(material_selection, pattern="^(банер|пленка|холст)$"))
+        application.add_handler(CallbackQueryHandler(material_type_selection, pattern="^type_"))
         application.add_handler(CallbackQueryHandler(restart, pattern="^restart$"))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
